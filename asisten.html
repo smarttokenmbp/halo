@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asisten Pribadi - Gemini Live</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; flex-direction: column; height: 100vh; }
+  header { padding: 12px 16px; font-weight: 600; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; }
+  header button { background: none; border: 1px solid #475569; color: #e2e8f0; border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+  #settings { padding: 14px 16px; background: #1e293b; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid #334155; }
+  #settings label { font-size: 13px; color: #94a3b8; display: flex; flex-direction: column; gap: 4px; }
+  #settings input, #settings select, #settings textarea { padding: 9px 10px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #fff; font-size: 14px; font-family: inherit; }
+  #settings .row { display: flex; gap: 10px; }
+  #settings .row > * { flex: 1; }
+  .chk { flex-direction: row !important; align-items: center; }
+  .hint { font-size: 12px; color: #64748b; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 80%; padding: 10px 14px; border-radius: 14px; line-height: 1.45; white-space: pre-wrap; }
+  .user { align-self: flex-end; background: #2563eb; }
+  .bot { align-self: flex-start; background: #1e293b; }
+  .sys { align-self: center; font-size: 13px; color: #94a3b8; text-align: center; }
+  #center { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; }
+  #talk { width: 76px; height: 76px; border-radius: 50%; border: none; font-size: 30px; cursor: pointer; background: #334155; color: #fff; transition: box-shadow .1s; }
+  #talk.on { background: #dc2626; box-shadow: 0 0 0 calc(var(--lvl, 0) * 26px) #dc262655; }
+  #talk:disabled { opacity: .5; }
+  #status { font-size: 13px; color: #94a3b8; min-height: 18px; text-align: center; }
+  form { display: flex; gap: 8px; padding: 0 12px 12px; }
+  form input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid #334155; background: #1e293b; color: #fff; font-size: 15px; }
+  form button { border: none; border-radius: 10px; padding: 0 16px; background: #334155; color: #fff; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <span>🎙️ Asisten Pribadi</span>
+  <button id="toggleSet">⚙️ Pengaturan</button>
+</header>
+
+<div id="settings">
+  <label>API Key Gemini
+    <input id="apiKey" type="password" placeholder="Tempel API key dari aistudio.google.com">
+  </label>
+  <label class="chk"><input id="remember" type="checkbox"> Ingat API key di browser ini</label>
+  <div class="row">
+    <label>Model
+      <input id="model" value="gemini-3.8-live">
+    </label>
+    <label>Suara
+      <select id="voice">
+        <option>Kore</option><option>Puck</option><option>Charon</option>
+        <option>Aoede</option><option>Fenrir</option><option>Leda</option><option>Orus</option><option>Zephyr</option>
+      </select>
+    </label>
+  </div>
+  <label>Kepribadian asisten
+    <textarea id="persona" rows="3">Kamu adalah asisten pribadi milik Kharis. Bicara dalam Bahasa Indonesia yang santai, hangat, dan ringkas seperti ngobrol di telepon. Jangan bertele-tele.</textarea>
+  </label>
+  <div class="hint">API key hanya dikirim langsung ke Google, tidak ke tempat lain. Jangan bagikan file ini setelah key tersimpan.</div>
+</div>
+
+<div id="log"></div>
+<div id="center">
+  <button id="talk" title="Mulai / akhiri obrolan">🎤</button>
+  <div id="status">Isi API key, lalu tekan 🎤 untuk mulai ngobrol</div>
+</div>
+<form id="form">
+  <input id="input" placeholder="Atau ketik di sini (saat sesi aktif)..." autocomplete="off">
+  <button>➤</button>
+</form>
+
+<script>
+// ================== Pengaturan (disimpan di browser) ==================
+const $ = id => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  del(k) { try { localStorage.removeItem(k); } catch {} },
+};
+for (const k of ['model', 'voice', 'persona']) { const v = store.get('asisten_' + k); if (v) $(k).value = v; }
+const savedKey = store.get('asisten_key');
+if (savedKey) { $('apiKey').value = savedKey; $('remember').checked = true; $('settings').style.display = 'none'; }
+$('toggleSet').onclick = () => { const s = $('settings'); s.style.display = s.style.display === 'none' ? 'flex' : 'none'; };
+
+function simpanPengaturan() {
+  for (const k of ['model', 'voice', 'persona']) store.set('asisten_' + k, $(k).value);
+  if ($('remember').checked) store.set('asisten_key', $('apiKey').value.trim());
+  else store.del('asisten_key');
+}
+
+// ================== Tampilan chat ==================
+const log = $('log'), talkBtn = $('talk'), statusEl = $('status');
+let userBubble = null, botBubble = null;
+function bubble(cls, text = '') {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+  return d;
+}
+function appendTo(who, text) {
+  if (who === 'user') {
+    if (!userBubble) userBubble = bubble('user');
+    userBubble.textContent += text;
+  } else {
+    userBubble = null;
+    if (!botBubble) botBubble = bubble('bot');
+    botBubble.textContent += text;
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+// ================== Audio helper ==================
+function bufToB64(buf) {
+  const bytes = new Uint8Array(buf); let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function b64ToBuf(b64) {
+  const s = atob(b64); const bytes = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Mic -> PCM16 mono 16kHz, dikirim tiap ~100ms
+const workletCode = `
+class MicProc extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Int16Array(1600); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (ch) {
+      let sum = 0;
+      for (let i = 0; i < ch.length; i++) {
+        const s = Math.max(-1, Math.min(1, ch[i]));
+        sum += s * s;
+        this.buf[this.n++] = s * 0x7fff;
+        if (this.n === this.buf.length) {
+          this.port.postMessage({ pcm: this.buf.buffer }, [this.buf.buffer]);
+          this.buf = new Int16Array(1600); this.n = 0;
+        }
+      }
+      this.port.postMessage({ lvl: Math.sqrt(sum / ch.length) });
+    }
+    return true;
+  }
+}
+registerProcessor('mic-proc', MicProc);`;
+
+let ws = null, micStream = null, micCtx = null, playCtx = null;
+let nextPlayTime = 0, sources = [];
+
+async function startMic() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+  });
+  micCtx = new AudioContext({ sampleRate: 16000 });
+  const url = URL.createObjectURL(new Blob([workletCode], { type: 'application/javascript' }));
+  await micCtx.audioWorklet.addModule(url);
+  const node = new AudioWorkletNode(micCtx, 'mic-proc');
+  node.port.onmessage = e => {
+    if (e.data.pcm && ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ realtimeInput: { audio: { data: bufToB64(e.data.pcm), mimeType: 'audio/pcm;rate=16000' } } }));
+    }
+    if (e.data.lvl !== undefined) talkBtn.style.setProperty('--lvl', Math.min(1, e.data.lvl * 6));
+  };
+  micCtx.createMediaStreamSource(micStream).connect(node);
+}
+
+// Speaker: PCM16 mono 24kHz, diantrikan supaya mulus
+function playPcm(arrayBuf) {
+  const i16 = new Int16Array(arrayBuf);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 0x8000;
+  const buf = playCtx.createBuffer(1, f32.length, 24000);
+  buf.copyToChannel(f32, 0);
+  const s = playCtx.createBufferSource();
+  s.buffer = buf; s.connect(playCtx.destination);
+  nextPlayTime = Math.max(nextPlayTime, playCtx.currentTime + 0.02);
+  s.start(nextPlayTime);
+  nextPlayTime += buf.duration;
+  sources.push(s);
+  s.onended = () => { sources = sources.filter(x => x !== s); };
+  statusEl.textContent = '🔊 Asisten bicara... (bicara saja untuk memotong)';
+}
+function stopPlayback() {
+  sources.forEach(s => { try { s.stop(); } catch {} });
+  sources = []; nextPlayTime = 0;
+}
+
+// ================== Koneksi ke Gemini Live API ==================
+async function start() {
+  const key = $('apiKey').value.trim();
+  if (!key) { $('settings').style.display = 'flex'; statusEl.textContent = '⚠️ Isi API key dulu'; return; }
+  simpanPengaturan();
+  $('settings').style.display = 'none';
+  talkBtn.disabled = true;
+  statusEl.textContent = 'Menghubungkan...';
+  playCtx = new AudioContext({ sampleRate: 24000 });
+
+  const url = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=' + encodeURIComponent(key);
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({
+      setup: {
+        model: 'models/' + $('model').value.trim(),
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: $('voice').value } } }
+        },
+        systemInstruction: { parts: [{ text: $('persona').value }] },
+        inputAudioTranscription: {},
+        outputAudioTranscription: {}
+      }
+    }));
+  };
+
+  ws.onmessage = async e => {
+    const raw = e.data instanceof Blob ? await e.data.text() : e.data;
+    let m; try { m = JSON.parse(raw); } catch { return; }
+
+    if (m.setupComplete) {
+      try { await startMic(); }
+      catch (err) { bubble('sys', '⚠️ Mikrofon tidak bisa diakses: ' + err.message); return stop(); }
+      talkBtn.disabled = false; talkBtn.classList.add('on');
+      statusEl.textContent = '🎤 Silakan bicara...';
+      bubble('sys', 'Sesi dimulai');
+      return;
+    }
+    if (m.error) { bubble('sys', '⚠️ ' + (m.error.message || JSON.stringify(m.error))); return; }
+    if (m.goAway) bubble('sys', 'Sesi akan segera berakhir (batas waktu Google). Tekan 🎤 lagi kalau terputus.');
+
+    const sc = m.serverContent;
+    if (!sc) return;
+    if (sc.interrupted) { stopPlayback(); botBubble = null; statusEl.textContent = '🎤 Mendengarkan...'; }
+    for (const p of sc.modelTurn?.parts || []) {
+      if (p.inlineData?.data) playPcm(b64ToBuf(p.inlineData.data));
+    }
+    if (sc.inputTranscription?.text) appendTo('user', sc.inputTranscription.text);
+    if (sc.outputTranscription?.text) appendTo('bot', sc.outputTranscription.text);
+    if (sc.turnComplete) {
+      userBubble = null; botBubble = null;
+      setTimeout(() => { if (!sources.length && ws) statusEl.textContent = '🎤 Silakan bicara...'; }, 300);
+    }
+  };
+
+  ws.onclose = e => {
+    if (!ws) return;
+    let pesan = 'Sesi berakhir';
+    if (e.reason) pesan += ': ' + e.reason;
+    if (/api key/i.test(e.reason)) pesan += '\n→ Cek lagi API key di ⚙️ Pengaturan.';
+    if (/model/i.test(e.reason)) pesan += '\n→ Cek nama model di ⚙️ Pengaturan (lihat di aistudio.google.com).';
+    bubble('sys', pesan);
+    cleanup();
+  };
+  ws.onerror = () => {};
+}
+
+function cleanup() {
+  stopPlayback();
+  micStream?.getTracks().forEach(t => t.stop());
+  micCtx?.close(); playCtx?.close();
+  micStream = micCtx = playCtx = null; ws = null;
+  userBubble = botBubble = null;
+  talkBtn.classList.remove('on'); talkBtn.disabled = false;
+  talkBtn.style.setProperty('--lvl', 0);
+  statusEl.textContent = 'Tekan 🎤 untuk mulai ngobrol';
+}
+function stop() { const w = ws; ws = null; w?.close(); cleanup(); bubble('sys', 'Sesi berakhir'); }
+
+talkBtn.onclick = () => (ws ? stop() : start());
+
+$('form').onsubmit = e => {
+  e.preventDefault();
+  const t = $('input').value.trim();
+  if (!t) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { bubble('sys', 'Tekan 🎤 dulu untuk memulai sesi'); return; }
+  stopPlayback();
+  userBubble = null; bubble('user', t); userBubble = null;
+  ws.send(JSON.stringify({ realtimeInput: { text: t } }));
+  $('input').value = '';
+};
+</script>
+</body>
+</html>
